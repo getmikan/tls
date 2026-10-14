@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, go: '1.26' }
+          - { os: windows-latest, go: '1.26' }
+          - { os: ubuntu-latest, go: '1.20' }
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: 0
+      GOTOOLCHAIN: local
+    steps:
+      # Keep testdata byte-exact: autocrlf on Windows runners rewrites LF.
+      - name: Disable CRLF conversion
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      # go.mod says go 1.20, so loopclosure flags upstream Go tests that assume
+      # per-iteration loop variables; the rest of vet stays on.
+      - name: Vet
+        if: matrix.go == '1.26'
+        run: go vet -loopclosure=false ./...
+      - name: Test
+        run: go test -count=1 ./...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: Test with the race detector
+        run: go test -race -count=1 ./...
