@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [citrus]
+    branches: [main, dev]
   pull_request:
-    branches: [citrus]
+    branches: [main, dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,13 +27,21 @@ jobs:
       CGO_ENABLED: 0
       GOTOOLCHAIN: local
     steps:
+      # Keep testdata byte-exact: autocrlf on Windows runners rewrites LF.
+      - name: Disable CRLF conversion
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
+      # go.mod says go 1.20, so loopclosure flags upstream Go tests that assume
+      # per-iteration loop variables; the rest of vet stays on.
       - name: Vet
         if: matrix.go == '1.26'
-        run: go vet ./...
+        run: go vet -loopclosure=false ./...
       - name: Test
         run: go test -count=1 ./...
 
