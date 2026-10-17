@@ -981,6 +981,17 @@ var outBufPool = sync.Pool{
 	},
 }
 
+// coalesceLimit bounds the records of one write that are sent to the
+// connection together: eight full-sized records. A large write goes out in
+// writes of up to about 128 KiB instead of one write per record, and the
+// network stack is paid per write. Nothing is held back: all of it is written
+// before the call returns.
+const coalesceLimit = 8 * (recordHeaderLen + maxPlaintext + maxRecordExpansion)
+
+// maxRecordExpansion bounds what encryption adds to a record payload: an
+// explicit nonce, a MAC or an AEAD tag, CBC padding, the TLS 1.3 content type.
+const maxRecordExpansion = 16 + 48 + 256 + 1
+
 // writeRecordLocked writes a TLS record with the given type and payload to the
 // connection and updates the record layer state.
 func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
@@ -1009,15 +1020,43 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 		outBufPool.Put(outBufPtr)
 	}()
 
-	var n int
+	// outBuf holds the encrypted records not written yet, which carry queued
+	// bytes of data.
+	outBuf = outBuf[:0]
+	var n, queued int
 	for len(data) > 0 {
 		m := len(data)
 		if maxPayload := c.maxPayloadSizeForWrite(typ); m > maxPayload {
 			m = maxPayload
 		}
 
-		_, outBuf = sliceForAppend(outBuf[:0], recordHeaderLen)
-		outBuf[0] = byte(typ)
+		start := len(outBuf)
+		need := start + recordHeaderLen + m + maxRecordExpansion
+		if start > 0 && need > coalesceLimit {
+			if _, err := c.write(outBuf); err != nil {
+				return n, err
+			}
+			n += queued
+			outBuf, queued = outBuf[:0], 0
+			start, need = 0, recordHeaderLen+m+maxRecordExpansion
+		}
+		if cap(outBuf) < need {
+			// Room for this record and, up to the limit, the ones after it,
+			// so that every record is encrypted in place behind the last.
+			size := start + len(data) + (len(data)/maxPlaintext+1)*(recordHeaderLen+maxRecordExpansion)
+			if size > coalesceLimit {
+				size = coalesceLimit
+			}
+			if size < need {
+				size = need
+			}
+			grown := make([]byte, start, size)
+			copy(grown, outBuf)
+			outBuf = grown
+		}
+
+		record := outBuf[start : start+recordHeaderLen]
+		record[0] = byte(typ)
 		vers := c.vers
 		if vers == 0 {
 			// Some TLS servers fail if the record version is
@@ -1028,21 +1067,29 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 			// See RFC 8446, Section 5.1.
 			vers = VersionTLS12
 		}
-		outBuf[1] = byte(vers >> 8)
-		outBuf[2] = byte(vers)
-		outBuf[3] = byte(m >> 8)
-		outBuf[4] = byte(m)
+		record[1] = byte(vers >> 8)
+		record[2] = byte(vers)
+		record[3] = byte(m >> 8)
+		record[4] = byte(m)
 
 		var err error
-		outBuf, err = c.out.encrypt(outBuf, data[:m], c.config.rand())
+		record, err = c.out.encrypt(record, data[:m], c.config.rand())
 		if err != nil {
 			return n, err
 		}
+		if &record[0] == &outBuf[:start+1][start] {
+			outBuf = outBuf[:start+len(record)] // encrypted in place
+		} else {
+			outBuf = append(outBuf[:start], record...)
+		}
+		queued += m
+		data = data[m:]
+	}
+	if len(outBuf) > 0 {
 		if _, err := c.write(outBuf); err != nil {
 			return n, err
 		}
-		n += m
-		data = data[m:]
+		n += queued
 	}
 
 	if typ == recordTypeChangeCipherSpec && c.vers != VersionTLS13 {
