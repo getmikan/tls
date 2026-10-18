@@ -118,3 +118,30 @@ func (c *Conn) releaseHandshakeBuffers() {
 	}
 	c.releaseInput()
 }
+
+// WaitRead blocks until Read can return data without blocking, or until the
+// read would fail; the error is the one Read would return. It runs the
+// handshake first, like Read.
+//
+// A caller that keeps a read buffer for every connection, such as a proxy's
+// relay, waits here and takes its buffer only once data is there, so that a
+// connection whose peer is silent holds no read buffer beyond the raw input
+// (see rawinput.go).
+func (c *Conn) WaitRead() error {
+	if err := c.Handshake(); err != nil {
+		return err
+	}
+	c.in.Lock()
+	defer c.in.Unlock()
+	for c.input.Len() == 0 {
+		if err := c.readRecord(); err != nil {
+			return err
+		}
+		for c.hand.Len() > 0 {
+			if err := c.handlePostHandshakeMessage(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

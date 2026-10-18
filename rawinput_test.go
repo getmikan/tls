@@ -148,3 +148,28 @@ func BenchmarkRawInputThroughput(b *testing.B) {
 		}
 	}
 }
+
+// TestWaitRead: WaitRead returns once data can be read, consumes nothing,
+// and reports the error Read would.
+func TestWaitRead(t *testing.T) {
+	client, server := rawInputPair(t)
+	go client.Write([]byte("hello"))
+	if err := server.WaitRead(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.WaitRead(); err != nil { // data is waiting: returns at once
+		t.Fatal(err)
+	}
+	p := make([]byte, 5)
+	if _, err := io.ReadFull(server, p); err != nil || string(p) != "hello" {
+		t.Fatalf("got %q, %v", p, err)
+	}
+	checkIdle(t, server, "after WaitRead and Read")
+	client.Close()
+	if err := server.WaitRead(); err != io.EOF {
+		t.Fatalf("WaitRead after close_notify: %v, want EOF", err)
+	}
+	if _, err := server.Read(p); err != io.EOF {
+		t.Fatalf("Read after close_notify: %v, want EOF", err)
+	}
+}
