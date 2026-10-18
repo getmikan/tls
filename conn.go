@@ -108,6 +108,14 @@ type Conn struct {
 	buffering bool         // whether records are buffered in sendBuf
 	sendBuf   []byte       // a buffer of records waiting to be sent
 
+	// rawInputBuf is the whole buffer of rawInput: rawInputSmall, the
+	// connection's own small buffer, or *rawInputPooled, taken from
+	// rawInputPool for a large record (see rawinput.go)
+	rawInputBuf    []byte
+	rawInputSmall  []byte
+	rawInputPooled *[]byte
+	lastRecordLen  int // payload length of the last record read
+
 	// bytesSent counts the bytes of application data sent.
 	// packetsSent counts packets.
 	bytesSent   int64
@@ -616,7 +624,6 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if c.in.err != nil {
 		return c.in.err
 	}
-	handshakeComplete := c.isHandshakeComplete.Load()
 
 	// This function modifies c.rawInput, which owns the c.input memory.
 	if c.input.Len() != 0 {
@@ -641,6 +648,20 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		}
 		return err
 	}
+	return c.readRecordBody(expectChangeCipherSpec)
+}
+
+// readRecordBody is the rest of readRecordOrCCS once a record header is in
+// c.rawInput.
+//
+// It is a function of its own so that its frame is not on the stack while a
+// connection waits for its next record: an idle connection's goroutine
+// blocks in the header read above, and the runtime shrinks a goroutine stack
+// at GC only when less than a quarter of it is in use.
+//
+//go:noinline
+func (c *Conn) readRecordBody(expectChangeCipherSpec bool) error {
+	handshakeComplete := c.isHandshakeComplete.Load()
 	hdr := c.rawInput.Bytes()[:recordHeaderLen]
 	typ := recordType(hdr[0])
 
@@ -688,6 +709,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	}
 
 	// Process message.
+	c.lastRecordLen = n
 	record := c.rawInput.Next(recordHeaderLen + n)
 	data, typ, err := c.in.decrypt(record)
 	if err != nil {
@@ -839,7 +861,7 @@ func (c *Conn) readFromUntil(r io.Reader, n int) error {
 	// There might be extra input waiting on the wire. Make a best effort
 	// attempt to fetch it so that it can be used in (*Conn).Read to
 	// "predict" closeNotify alerts.
-	c.rawInput.Grow(needs + bytes.MinRead)
+	c.reserveRawInput(needs + bytes.MinRead)
 	_, err := c.rawInput.ReadFrom(&atLeastReader{r, int64(needs)})
 	return err
 }
@@ -1441,6 +1463,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 	c.in.Lock()
 	defer c.in.Unlock()
+	defer c.releaseInput()
 
 	for c.input.Len() == 0 {
 		if err := c.readRecord(); err != nil {
@@ -1615,6 +1638,7 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 	c.handshakeErr = c.handshakeFn(handshakeCtx)
 	if c.handshakeErr == nil {
 		c.handshakes++
+		c.releaseHandshakeBuffers()
 	} else {
 		// If an error occurred during the handshake try to flush the
 		// alert that might be left in the buffer.
