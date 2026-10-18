@@ -623,7 +623,6 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if c.in.err != nil {
 		return c.in.err
 	}
-	handshakeComplete := c.isHandshakeComplete.Load()
 
 	// This function modifies c.rawInput, which owns the c.input memory.
 	if c.input.Len() != 0 {
@@ -648,6 +647,20 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		}
 		return err
 	}
+	return c.readRecordBody(expectChangeCipherSpec)
+}
+
+// readRecordBody is the rest of readRecordOrCCS once a record header is in
+// c.rawInput.
+//
+// It is a function of its own so that its frame is not on the stack while a
+// connection waits for its next record: an idle connection's goroutine
+// blocks in the header read above, and the runtime shrinks a goroutine stack
+// at GC only when less than a quarter of it is in use.
+//
+//go:noinline
+func (c *Conn) readRecordBody(expectChangeCipherSpec bool) error {
+	handshakeComplete := c.isHandshakeComplete.Load()
 	hdr := c.rawInput.Bytes()[:recordHeaderLen]
 	typ := recordType(hdr[0])
 
