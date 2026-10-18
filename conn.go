@@ -103,6 +103,11 @@ type Conn struct {
 	// input/output
 	in, out   halfConn
 	rawInput  bytes.Buffer // raw input, starting with a record header
+	input     bytes.Reader // application data waiting to be read, from rawInput.Next
+	hand      bytes.Buffer // handshake data waiting to be read
+	buffering bool         // whether records are buffered in sendBuf
+	sendBuf   []byte       // a buffer of records waiting to be sent
+
 	// rawInputBuf is the whole buffer of rawInput: rawInputSmall, the
 	// connection's own small buffer, or *rawInputPooled, taken from
 	// rawInputPool for a large record (see rawinput.go)
@@ -110,10 +115,6 @@ type Conn struct {
 	rawInputSmall  []byte
 	rawInputPooled *[]byte
 	lastRecordLen  int // payload length of the last record read
-	input     bytes.Reader // application data waiting to be read, from rawInput.Next
-	hand      bytes.Buffer // handshake data waiting to be read
-	buffering bool         // whether records are buffered in sendBuf
-	sendBuf   []byte       // a buffer of records waiting to be sent
 
 	// bytesSent counts the bytes of application data sent.
 	// packetsSent counts packets.
