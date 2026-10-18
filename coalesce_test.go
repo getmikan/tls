@@ -116,7 +116,9 @@ func TestWriteSmallRecordsUnchanged(t *testing.T) {
 	counted := &writeSizeConn{Conn: serverConn}
 	server := Server(counted, testConfig.Clone())
 	defer server.Close()
+	clientDone := make(chan struct{})
 	go func() {
+		defer close(clientDone)
 		client := Client(clientConn, testConfig.Clone())
 		defer client.Close()
 		buf := make([]byte, 100)
@@ -139,4 +141,5 @@ func TestWriteSmallRecordsUnchanged(t *testing.T) {
 			t.Fatalf("write %d: writes %v, want one record of %d bytes", i, writes, recordHeaderLen+10+1+16)
 		}
 	}
+	<-clientDone // before the connections are closed
 }
